@@ -92,8 +92,7 @@ const cameraURL = `url('${CameraImage.src}')`;
 		async init() {
 			try {
 				const stream = await navigator.mediaDevices.getUserMedia({
-					video: true,
-				});
+					video: { facingMode: { exact: "environment" } } });
 				this.hVid = document.querySelector("video");
 				this.hFreeze = document.getElementById("freeze-frame");
 				this.hVid.srcObject = stream;
@@ -340,14 +339,18 @@ const cameraURL = `url('${CameraImage.src}')`;
 		}
 
 		#snap-btn {
-			padding: 45px 35px;
+			padding: 25px;
 			justify-self: center;
 			border: 0;
 			background: rgb(126, 165, 165);
-			color: black;
+			border-bottom: 5px solid rgb(86 128 128);
+			color: white;
 			border-radius: 10000px;
 			cursor: pointer;
 			z-index: 10px;
+			aspect-ratio: 1;
+			font-weight: bold;
+			font-size: 25px;
 		}
 
 		#snap-btn:disabled {
