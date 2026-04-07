@@ -1,0 +1,549 @@
+---
+import Layout from "../layout/Layout.astro";
+import CameraImage from "./assets/camera.png";
+const cameraURL = `url('${CameraImage.src}')`;
+---
+
+<Layout>
+	<div id="submitted-alert" role="status" aria-live="polite" hidden>
+		<svg
+			xmlns="http://www.w3.org/2000/svg"
+			width="17"
+			height="12"
+			viewBox="0 0 17 12"
+			fill="none"
+			aria-hidden="true"
+		>
+			<path
+				d="M1 6L6 11L16 1"
+				stroke="#2C5A29"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"></path>
+		</svg>
+		<p>Submitted!</p>
+	</div>
+
+	<!-- Camera -->
+	<div class="camera">
+		<div class="camera-view">
+			<video autoplay playsinline muted></video>
+			<canvas id="freeze-frame" aria-hidden="true"></canvas>
+		</div>
+		<button id="snap-btn" type="button" class="material-icons" disabled
+			>SNAP</button
+		>
+	</div>
+
+	<!-- Native HTML dialog / bottom sheet -->
+	<dialog id="snap-dialog" aria-labelledby="sheet-title">
+		<form id="snap-form" enctype="multipart/form-data" method="dialog">
+			<div class="sheet-header">
+				<h2 id="sheet-title">Add details</h2>
+				<button
+					type="button"
+					id="close-sheet"
+					class="icon-btn"
+					aria-label="Close dialog">✕</button
+				>
+			</div>
+
+			<div class="sheet-body">
+				<img id="image-preview" src="" alt="Image Preview">
+				<label for="prompt">Because of AI this will...</label>
+				<select id="prompt" name="prompt" required>
+					<option value="" disabled selected>Select a prompt</option>
+					<option value="thrive">thrive</option>
+					<option value="enhanced">be enhanced</option>
+					<option value="replaced">be replaced</option>
+					<option value="not-exist">no longer exist</option>
+					<option value="worse">be worse</option>
+					<option value="change">change</option>
+				</select>
+
+				<label for="comments">Thoughts or why you think this:</label>
+				<textarea id="comments" name="comments" rows="5" placeholder="This will be replaced by..."></textarea>
+			</div>
+
+			<div class="sheet-actions">
+				<button type="button" id="cancel-btn" class="secondary-btn"
+					>Cancel</button
+				>
+				<button type="submit" id="submit-btn" class="primary-btn">Submit</button
+				>
+			</div>
+		</form>
+	</dialog>
+</Layout>
+
+<script>
+	import PocketBase from "pocketbase";
+
+	const pb = new PocketBase("https://museumcp.reecen.dev");
+
+	let pendingPhotoFile = null;
+	let alertTimer = null;
+	let frozen = false;
+
+	const webcam = {
+		hVid: null,
+		hFreeze: null,
+
+		async init() {
+			try {
+				const stream = await navigator.mediaDevices.getUserMedia({
+					video: true,
+				});
+				this.hVid = document.querySelector("video");
+				this.hFreeze = document.getElementById("freeze-frame");
+				this.hVid.srcObject = stream;
+				document.getElementById("snap-btn").disabled = false;
+			} catch (err) {
+				console.error("Camera init failed:", err);
+			}
+		},
+
+		snap() {
+			if (!this.hVid || !this.hVid.videoWidth || !this.hVid.videoHeight) {
+				throw new Error("Video is not ready yet.");
+			}
+
+			const cv = document.createElement("canvas");
+			const cx = cv.getContext("2d");
+
+			cv.width = this.hVid.videoWidth;
+			cv.height = this.hVid.videoHeight;
+
+			cx.drawImage(this.hVid, 0, 0);
+			return cv;
+		},
+
+		freeze() {
+			if (
+				!this.hVid ||
+				!this.hFreeze ||
+				!this.hVid.videoWidth ||
+				!this.hVid.videoHeight
+			) {
+				return;
+			}
+
+			const canvas = this.hFreeze;
+			const ctx = canvas.getContext("2d");
+
+			canvas.width = this.hVid.videoWidth;
+			canvas.height = this.hVid.videoHeight;
+
+			// draw in grayscale for the "frozen black and white" look
+			ctx.filter = "grayscale(1)";
+			ctx.drawImage(this.hVid, 0, 0, canvas.width, canvas.height);
+			ctx.filter = "none";
+
+			canvas.classList.add("is-visible");
+			frozen = true;
+		},
+
+		unfreeze() {
+			if (!this.hFreeze) return;
+
+			const ctx = this.hFreeze.getContext("2d");
+			ctx.clearRect(0, 0, this.hFreeze.width, this.hFreeze.height);
+			this.hFreeze.classList.remove("is-visible");
+			frozen = false;
+		},
+
+		async canvasToBlob(canvas) {
+			return new Promise((resolve, reject) => {
+				canvas.toBlob((blob) => {
+					if (!blob) {
+						reject(new Error("Failed to create blob from canvas."));
+						return;
+					}
+					resolve(blob);
+					document.getElementById('image-preview').src = URL.createObjectURL(blob);
+				}, "image/png");
+			});
+		},
+
+		async captureToFile() {
+			const canvas = this.snap();
+			const blob = await this.canvasToBlob(canvas);
+			const photoID = crypto.randomUUID();
+			return new File([blob], `${photoID}.png`, { type: "image/png" });
+		},
+	};
+
+	function openSheet() {
+		const dialog = document.getElementById("snap-dialog");
+		if (!dialog.open) {
+			dialog.showModal();
+		}
+	}
+
+	function closeSheet() {
+		const dialog = document.getElementById("snap-dialog");
+		if (dialog.open) {
+			dialog.close();
+		}
+	}
+
+	function resetSheetForm() {
+		const form = document.getElementById("snap-form");
+		form.reset();
+	}
+
+	function showSubmittedAlert() {
+		const alertEl = document.getElementById("submitted-alert");
+
+		if (alertTimer) {
+			clearTimeout(alertTimer);
+		}
+
+		alertEl.hidden = false;
+		alertEl.classList.add("is-visible");
+
+		alertTimer = setTimeout(() => {
+			alertEl.classList.remove("is-visible");
+
+			setTimeout(() => {
+				alertEl.hidden = true;
+			}, 250);
+		}, 3000);
+	}
+
+	async function handleSnapClick() {
+		try {
+			pendingPhotoFile = await webcam.captureToFile();
+
+			// visually freeze the camera view and make it black & white
+			webcam.freeze();
+
+			openSheet();
+		} catch (err) {
+			console.error("Snap failed:", err);
+		}
+	}
+
+	async function submitPrompt(event) {
+		event.preventDefault();
+
+		if (!pendingPhotoFile) {
+			console.error("No photo captured yet.");
+			return;
+		}
+
+		const submitBtn = document.getElementById("submit-btn");
+		submitBtn.disabled = true;
+		submitBtn.textContent = "Submitting...";
+
+		try {
+			const prompt = document.getElementById("prompt").value;
+			const comments = document.getElementById("comments").value;
+
+			const formData = new FormData();
+			formData.append("photo", pendingPhotoFile);
+			formData.append("prompt", prompt);
+			formData.append("comments", comments);
+
+			const created = await pb.collection("digital_polaroids").create(formData);
+			console.log("Created record:", created);
+
+			closeSheet();
+			resetSheetForm();
+			pendingPhotoFile = null;
+
+			// return to live camera feed after successful submit
+			webcam.unfreeze();
+
+			showSubmittedAlert();
+		} catch (err) {
+			console.error("Submit failed:", err);
+		} finally {
+			submitBtn.disabled = false;
+			submitBtn.textContent = "Submit";
+		}
+	}
+
+	window.addEventListener("load", () => {
+		webcam.init();
+
+		document
+			.getElementById("snap-btn")
+			.addEventListener("click", handleSnapClick);
+		document
+			.getElementById("snap-form")
+			.addEventListener("submit", submitPrompt);
+
+		document.getElementById("close-sheet").addEventListener("click", () => {
+			closeSheet();
+			webcam.unfreeze();
+			pendingPhotoFile = null;
+		});
+
+		document.getElementById("cancel-btn").addEventListener("click", () => {
+			closeSheet();
+			webcam.unfreeze();
+			pendingPhotoFile = null;
+		});
+
+		const dialog = document.getElementById("snap-dialog");
+
+		dialog.addEventListener("cancel", () => {
+			webcam.unfreeze();
+			pendingPhotoFile = null;
+		});
+	});
+</script>
+
+<style define:vars={{ cameraURL }}>
+
+	body {
+		margin: 0;
+		background-color: #dbd8d1;
+	}
+
+	.camera {
+		display: flex;
+		flex-direction: column;
+		justify-content: stretch;
+		align-items: center;
+		position: relative;
+		overflow: hidden;
+
+		.camera-view {
+			max-width: 100%;
+			max-height: 400px;
+
+			&::after {
+				content: "";
+				position: relative;
+				display: block;
+				width: 920px;
+				aspect-ratio: 1.33;
+				background-image: var(--cameraURL);
+				background-size: contain;
+				background-repeat: no-repeat;
+				left: -80px;
+				top: -490px;
+				z-index: 10;
+				pointer-events: none;
+			}
+		}
+
+		video {
+			display: block;
+			width: 300px;
+			aspect-ratio: 1.33;
+			position: relative;
+			padding-top: 100px;
+		}
+
+		#snap-btn {
+			padding: 45px 35px;
+			justify-self: center;
+			border: 0;
+			background: rgb(126, 165, 165);
+			color: black;
+			border-radius: 10000px;
+			cursor: pointer;
+			z-index: 10px;
+		}
+
+		#snap-btn:disabled {
+			opacity: 0.5;
+			cursor: not-allowed;
+		}
+	}
+	.camera-view {
+		position: relative;
+		max-width: 100%;
+		max-height: 400px;
+
+		&::after {
+			content: "";
+			position: relative;
+			display: block;
+			width: 920px;
+			aspect-ratio: 1.33;
+			background-image: var(--cameraURL);
+			background-size: contain;
+			background-repeat: no-repeat;
+			left: -80px;
+			top: -490px;
+			z-index: 10;
+		}
+	}
+
+	video,
+	#freeze-frame {
+		display: block;
+		width: 300px;
+		aspect-ratio: 1.33;
+		position: relative;
+		padding-top: 100px;
+	}
+
+	#image-preview {
+		width: 200px;
+		transform: rotate(-8.722deg);
+		border-radius: 8px;
+		border-top: 10px solid #FFF;
+		border-right: 10px solid #FFF;
+		border-bottom: 50px solid #FFF;
+		border-left: 10px solid #FFF;
+		box-shadow: 0 4px 4px 0 rgba(0, 0, 0, 0.25);
+		align-self: center;
+		filter: grayscale(1) ;
+		margin-bottom: 25px;
+	}
+
+	#freeze-frame {
+		position: absolute;
+		inset: 0;
+		opacity: 0;
+		pointer-events: none;
+		z-index: 2;
+		transition: opacity 0.2s ease;
+	}
+
+	#freeze-frame.is-visible {
+		opacity: 1;
+	}
+
+    /* Submitted alert */
+    #submitted-alert {
+		display: inline-flex;
+		position: fixed;
+		top: 16px;
+		left: 50%;
+		transform: translateX(-50%) translateY(-10px);
+		padding: 10px 55px 11px 56px;
+		justify-content: center;
+		align-items: center;
+		border-radius: 10000px;
+		background: #cbe9c4;
+		gap: 10px;
+		color: #2c5a29;
+		z-index: 1000;
+		opacity: 0;
+		transition:
+			opacity 0.25s ease,
+			transform 0.25s ease;
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+
+		p {
+			margin: 0;
+		}
+	}
+
+	#submitted-alert.is-visible {
+		opacity: 1;
+		transform: translateX(-50%) translateY(0);
+	}
+
+	/* Native dialog bottom sheet */
+	#snap-dialog {
+		width: min(100%, 640px);
+		max-width: 640px;
+		margin: auto auto 0 auto;
+		border: none;
+		padding: 0;
+		border-radius: 24px 24px 0 0;
+		background: #eeece6;
+		color: inherit;
+		box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.18);
+		transform: translateY(100%);
+		opacity: 0;
+		transition:
+			transform 0.28s ease,
+			opacity 0.28s ease,
+			display 0.28s allow-discrete,
+			overlay 0.28s allow-discrete;
+	}
+
+	#snap-dialog[open] {
+		transform: translateY(0);
+		opacity: 1;
+	}
+
+	#snap-dialog::backdrop {
+		background: rgba(0, 0, 0, 0.35);
+		backdrop-filter: blur(2px);
+	}
+
+	#snap-form {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		padding: 20px;
+	}
+
+	.sheet-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+
+		h2 {
+			margin: 0;
+			font-size: 1.2rem;
+		}
+	}
+
+	.sheet-body {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+
+	.sheet-body label {
+		font-weight: 600;
+	}
+
+	.sheet-body select,
+	.sheet-body textarea {
+		width: 100%;
+		border: 1px solid #d1d5db;
+		border-radius: 12px;
+		padding: 12px;
+		font: inherit;
+		box-sizing: border-box;
+		background: white;
+	}
+
+	.sheet-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 10px;
+	}
+
+	.icon-btn,
+	.secondary-btn,
+	.primary-btn {
+		border: 0;
+		border-radius: 999px;
+		padding: 10px 16px;
+		font: inherit;
+		cursor: pointer;
+	}
+
+	.icon-btn {
+		background: transparent;
+		padding: 6px 10px;
+		font-size: 1.1rem;
+	}
+
+	.secondary-btn {
+		background: #eeece6;
+		color: #111827;
+	}
+
+	.primary-btn {
+		background: rgb(126, 165, 165);
+		color: black;
+	}
+
+	.primary-btn:disabled {
+		opacity: 0.6;
+		cursor: wait;
+	}
+</style>
